@@ -1,0 +1,33 @@
+# Build artifacts
+*.lo
+*.la
+*.o
+*.so
+*.dep
+*.lai
+.libs/
+modules/
+autom4te.cache/
+
+# Generated build files
+config.h
+config.h.in
+config.log
+config.nice
+config.status
+configure
+configure.ac
+Makefile
+Makefile.fragments
+Makefile.global
+Makefile.objects
+libtool
+build/
+run-tests.php
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
