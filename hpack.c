@@ -71,10 +71,10 @@ static zend_object *hpack_context_create(zend_class_entry *ce)
 /* Sensitive headers that should not be indexed */
 static int is_sensitive_header(const char *name, size_t namelen)
 {
-	if (namelen == 13 && memcmp(name, "authorization", 13) == 0) return 1;
-	if (namelen == 6 && memcmp(name, "cookie", 6) == 0) return 1;
-	if (namelen == 19 && memcmp(name, "proxy-authorization", 19) == 0) return 1;
-	if (namelen == 10 && memcmp(name, "set-cookie", 10) == 0) return 1;
+	if (namelen == 13 && zend_binary_strcasecmp(name, 13, "authorization", 13) == 0) return 1;
+	if (namelen == 6 && zend_binary_strcasecmp(name, 6, "cookie", 6) == 0) return 1;
+	if (namelen == 19 && zend_binary_strcasecmp(name, 19, "proxy-authorization", 19) == 0) return 1;
+	if (namelen == 10 && zend_binary_strcasecmp(name, 10, "set-cookie", 10) == 0) return 1;
 	return 0;
 }
 
@@ -167,11 +167,11 @@ PHP_METHOD(HPackContext, encode)
 			RETURN_THROWS();
 		}
 
-		if (Z_TYPE_P(name_zv) != IS_STRING) {
-			convert_to_string(name_zv);
-		}
-		if (Z_TYPE_P(value_zv) != IS_STRING) {
-			convert_to_string(value_zv);
+		if (Z_TYPE_P(name_zv) != IS_STRING || Z_TYPE_P(value_zv) != IS_STRING) {
+			efree(nva);
+			zend_throw_exception(zend_ce_value_error,
+				"Header name and value must be strings", 0);
+			RETURN_THROWS();
 		}
 
 		nva[i].name = (uint8_t *)Z_STRVAL_P(name_zv);
@@ -250,6 +250,7 @@ PHP_METHOD(HPackContext, decode)
 			buf, buflen, 1);
 
 		if (rv < 0) {
+			nghttp2_hd_inflate_end_headers(ctx->inflater);
 			zval_ptr_dtor(return_value);
 			RETURN_NULL();
 		}
@@ -258,7 +259,8 @@ PHP_METHOD(HPackContext, decode)
 		buflen -= (size_t)rv;
 
 		if (inflate_flags & NGHTTP2_HD_INFLATE_EMIT) {
-			total_size += nv.namelen + nv.valuelen;
+			/* RFC 7541 Section 4.1: entry size = name length + value length + 32 */
+			total_size += nv.namelen + nv.valuelen + 32;
 
 			if (total_size > (size_t)max_size) {
 				nghttp2_hd_inflate_end_headers(ctx->inflater);
@@ -279,10 +281,17 @@ PHP_METHOD(HPackContext, decode)
 		}
 
 		if (rv == 0 && buflen == 0) {
-			/* All input consumed without FINAL - invalid */
-			break;
+			/* All input consumed without FINAL flag - incomplete header block */
+			nghttp2_hd_inflate_end_headers(ctx->inflater);
+			zval_ptr_dtor(return_value);
+			RETURN_NULL();
 		}
 	}
+
+	/* Loop exited without FINAL or error - should not happen, treat as failure */
+	nghttp2_hd_inflate_end_headers(ctx->inflater);
+	zval_ptr_dtor(return_value);
+	RETURN_NULL();
 }
 /* }}} */
 
@@ -380,7 +389,13 @@ PHP_FUNCTION(hpack_huffman_encode)
 		RETURN_EMPTY_STRING();
 	}
 
-	/* Calculate output size: worst case is ~4x input */
+	/* Guard against integer overflow in buffer size calculation */
+	if (input_len > SIZE_MAX / 4) {
+		zend_throw_exception(zend_ce_value_error, "Input too large for Huffman encoding", 0);
+		RETURN_THROWS();
+	}
+
+	/* Calculate output size: worst case is ~4x input (max code is 30 bits = 3.75 bytes) */
 	output_size = input_len * 4 + 1;
 	output = ecalloc(1, output_size);
 
@@ -429,7 +444,7 @@ PHP_FUNCTION(hpack_huffman_decode)
 	uint8_t *output;
 	size_t output_size;
 	size_t output_pos = 0;
-	uint32_t accumulator = 0;
+	uint64_t accumulator = 0;
 	uint8_t acc_bits = 0;
 
 	ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -453,17 +468,17 @@ PHP_FUNCTION(hpack_huffman_decode)
 
 			for (int sym = 0; sym < 256; sym++) {
 				if (huffman_table[sym].bits <= acc_bits) {
-					uint32_t mask = (1U << huffman_table[sym].bits) - 1;
-					uint32_t candidate = (accumulator >> (acc_bits - huffman_table[sym].bits)) & mask;
+					uint64_t mask = (1ULL << huffman_table[sym].bits) - 1;
+					uint64_t candidate = (accumulator >> (acc_bits - huffman_table[sym].bits)) & mask;
 
-					if (candidate == huffman_table[sym].code) {
+					if (candidate == (uint64_t)huffman_table[sym].code) {
 						if (output_pos >= output_size) {
 							output_size *= 2;
 							output = erealloc(output, output_size);
 						}
 						output[output_pos++] = (uint8_t)sym;
 						acc_bits -= huffman_table[sym].bits;
-						accumulator &= (1U << acc_bits) - 1;
+						accumulator &= (1ULL << acc_bits) - 1;
 						found = 1;
 						break;
 					}
@@ -471,19 +486,32 @@ PHP_FUNCTION(hpack_huffman_decode)
 			}
 
 			if (!found) {
+				/*
+				 * No data symbol matched. If we have >= 30 bits (the maximum
+				 * code length in HPACK Huffman), the only remaining possibility
+				 * is the EOS symbol (0x3FFFFFFF, 30 bits).
+				 * RFC 7541 Section 5.2: "A Huffman-encoded string literal
+				 * containing the EOS symbol MUST be treated as a decoding error."
+				 */
+				if (acc_bits >= 30) {
+					efree(output);
+					RETURN_FALSE;
+				}
 				break;
 			}
 		}
 	}
 
-	/* Verify padding is all 1s */
+	/* RFC 7541 Section 5.2: padding validation */
 	if (acc_bits > 0 && acc_bits <= 7) {
-		uint32_t pad_mask = (1U << acc_bits) - 1;
+		/* Padding must correspond to the most significant bits of EOS (all 1s) */
+		uint64_t pad_mask = (1ULL << acc_bits) - 1;
 		if ((accumulator & pad_mask) != pad_mask) {
 			efree(output);
 			RETURN_FALSE;
 		}
 	} else if (acc_bits > 7) {
+		/* Padding strictly longer than 7 bits MUST be a decoding error */
 		efree(output);
 		RETURN_FALSE;
 	}
