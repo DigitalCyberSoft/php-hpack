@@ -175,6 +175,7 @@ PHP_METHOD(HPackContext, encode)
 	ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(headers_zv), entry) {
 		zval *name_zv, *value_zv;
 
+		ZVAL_DEREF(entry);
 		if (Z_TYPE_P(entry) != IS_ARRAY || zend_hash_num_elements(Z_ARRVAL_P(entry)) < 2) {
 			efree(nva);
 			zend_throw_exception(zend_ce_value_error,
@@ -190,6 +191,18 @@ PHP_METHOD(HPackContext, encode)
 			zend_throw_exception(zend_ce_value_error,
 				"Each header must be an array of [name, value]", 0);
 			RETURN_THROWS();
+		}
+
+		ZVAL_DEREF(name_zv);
+		ZVAL_DEREF(value_zv);
+
+		/* Coerce integers to strings (e.g. [":status", 200]).
+		   Objects are NOT converted to avoid __toString re-entrance. */
+		if (Z_TYPE_P(name_zv) == IS_LONG) {
+			convert_to_string(name_zv);
+		}
+		if (Z_TYPE_P(value_zv) == IS_LONG) {
+			convert_to_string(value_zv);
 		}
 
 		if (Z_TYPE_P(name_zv) != IS_STRING || Z_TYPE_P(value_zv) != IS_STRING) {

@@ -45,9 +45,22 @@ echo "Empty decode: " . ($result === null ? "null" : "array(" . count($result) .
  * (Prevents convert_to_string re-entrance / use-after-free via __toString)
  */
 echo "--- Type safety ---\n";
+
+// Integers should be coerced to strings (e.g. [":status", 200])
+$ctx = new HPackContext();
+$encoded = $ctx->encode([[":status", 200]]);
+$dec = new HPackContext();
+$decoded = $dec->decode($encoded, 8192);
+echo "int value coerced: " . ($decoded[0][1] === "200" ? "ok" : "fail") . "\n";
+
+$ctx = new HPackContext();
+$encoded = $ctx->encode([[123, "value"]]);
+$dec = new HPackContext();
+$decoded = $dec->decode($encoded, 8192);
+echo "int name coerced: " . ($decoded[0][0] === "123" ? "ok" : "fail") . "\n";
+
+// Non-integer non-string types must still throw ValueError
 $types = [
-    'int name'    => [[123, "value"]],
-    'int value'   => [["name", 456]],
     'bool value'  => [["name", true]],
     'null value'  => [["name", null]],
     'float name'  => [[1.5, "value"]],
@@ -143,8 +156,8 @@ Truncated half: null
 Incomplete literal: null
 Empty decode: array(0)
 --- Type safety ---
-int name: ValueError
-int value: ValueError
+int value coerced: ok
+int name coerced: ok
 bool value: ValueError
 null value: ValueError
 float name: ValueError
