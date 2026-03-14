@@ -14,6 +14,15 @@
 #include "ext/spl/spl_exceptions.h"
 #include "php_hpack.h"
 
+/* PHP 7.4 compatibility */
+#if PHP_VERSION_ID < 80000
+# define RETURN_THROWS() return
+# define zend_ce_value_error spl_ce_InvalidArgumentException
+#endif
+#ifndef ZEND_ACC_NO_DYNAMIC_PROPERTIES
+# define ZEND_ACC_NO_DYNAMIC_PROPERTIES 0
+#endif
+
 #include <nghttp2/nghttp2.h>
 
 /* ----------------------------------------------------------------
