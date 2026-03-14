@@ -122,6 +122,22 @@ PHP_METHOD(HPackContext, __construct)
 			"Failed to initialize HPACK inflater: %s", nghttp2_strerror(rv));
 		RETURN_THROWS();
 	}
+
+	/* Tell the inflater about the non-default SETTINGS_HEADER_TABLE_SIZE so it
+	   accepts dynamic table size update instructions (RFC 7541 §6.3) up to
+	   the configured size instead of rejecting them against the 4096 default. */
+	if ((size_t)table_size != NGHTTP2_DEFAULT_HEADER_TABLE_SIZE) {
+		rv = nghttp2_hd_inflate_change_table_size(ctx->inflater, (size_t)table_size);
+		if (rv != 0) {
+			nghttp2_hd_deflate_del(ctx->deflater);
+			ctx->deflater = NULL;
+			nghttp2_hd_inflate_del(ctx->inflater);
+			ctx->inflater = NULL;
+			zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+				"Failed to set inflater table size: %s", nghttp2_strerror(rv));
+			RETURN_THROWS();
+		}
+	}
 }
 /* }}} */
 
